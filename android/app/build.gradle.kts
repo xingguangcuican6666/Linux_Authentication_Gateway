@@ -11,6 +11,11 @@ val localProperties = Properties().apply {
     if (f.exists()) load(f.inputStream())
 }
 
+// Resolved once so the same value is used in both signingConfigs and buildTypes blocks.
+val ksFilePath: String? = System.getenv("KEYSTORE_PATH")
+    ?: localProperties.getProperty("keystore.path")
+val hasSigningConfig = !ksFilePath.isNullOrEmpty()
+
 android {
     namespace = "com.biolink.auth"
     compileSdk = 34
@@ -24,21 +29,19 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            val ksFile = System.getenv("KEYSTORE_PATH")
-                ?: localProperties.getProperty("keystore.path")
-            val ksPassword = System.getenv("KEYSTORE_PASSWORD")
-                ?: localProperties.getProperty("keystore.password")
-            val keyAlias = System.getenv("KEY_ALIAS")
-                ?: localProperties.getProperty("key.alias")
-            val keyPassword = System.getenv("KEY_PASSWORD")
-                ?: localProperties.getProperty("key.password")
-
-            if (!ksFile.isNullOrEmpty()) {
-                storeFile = file(ksFile)
-                storePassword = ksPassword
-                this.keyAlias = keyAlias
-                this.keyPassword = keyPassword
+        // Only create the signing config when a keystore is actually available.
+        // Without this guard, packageRelease fails on PR builds (no keystore)
+        // because AGP requires storeFile to be set whenever a signingConfig is
+        // applied to a build type.
+        if (hasSigningConfig) {
+            create("release") {
+                storeFile = file(ksFilePath!!)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                    ?: localProperties.getProperty("keystore.password")
+                this.keyAlias = System.getenv("KEY_ALIAS")
+                    ?: localProperties.getProperty("key.alias")
+                keyPassword = System.getenv("KEY_PASSWORD")
+                    ?: localProperties.getProperty("key.password")
             }
         }
     }
@@ -51,7 +54,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            if (hasSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         debug {
             applicationIdSuffix = ".debug"
