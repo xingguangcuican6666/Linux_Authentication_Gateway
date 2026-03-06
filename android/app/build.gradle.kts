@@ -34,7 +34,7 @@ android {
             val keyPassword = System.getenv("KEY_PASSWORD")
                 ?: localProperties.getProperty("key.password")
 
-            if (ksFile != null) {
+            if (!ksFile.isNullOrEmpty()) {
                 storeFile = file(ksFile)
                 storePassword = ksPassword
                 this.keyAlias = keyAlias
