@@ -1,4 +1,4 @@
-# PAM configuration examples for BioLink 4FA
+# PAM configuration examples for BioLink 4FA (ADB)
 #
 # Place the relevant snippet in the appropriate /etc/pam.d/ file.
 # The exact file depends on your display manager and login method:
@@ -15,7 +15,7 @@
 #
 #   Factor 1: UNIX password
 #   Factor 2: Face recognition (Howdy)
-#   Factor 3: Phone presence + fingerprint (BioLink)
+#   Factor 3: Phone fingerprint via ADB (BioLink)
 #
 # NOTE: Howdy's pam_howdy.so typically replaces password (sufficient).
 #       Adjust the control flags to suit your threat model.
@@ -29,7 +29,7 @@ auth      required   pam_unix.so
 # Factor 2: Face (Howdy) – if Howdy succeeds, password is still required above
 auth      required   pam_howdy.so
 #
-# Factor 3 + 4: Phone presence (BLE proximity) + hardware fingerprint (TEE ECDSA)
+# Factor 3: Phone fingerprint via ADB (BioLink)
 auth      required   pam_exec.so expose_authtok /usr/bin/biolink-client
 
 # session / account / password lines stay as your distro defaults

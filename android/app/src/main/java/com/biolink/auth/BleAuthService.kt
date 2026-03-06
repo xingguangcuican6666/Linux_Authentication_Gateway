@@ -219,8 +219,9 @@ class BleAuthService : LifecycleService() {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
+            Log.d(TAG, "onCharacteristicChanged called for ${characteristic.uuid}")
             if (characteristic.uuid == Constants.CHALLENGE_CHAR_UUID) {
-                Log.i(TAG, "Challenge received (${value.size} bytes)")
+                Log.i(TAG, "Challenge received (${value.size} bytes) via new API")
                 handleChallenge(g, value)
             }
         }
@@ -231,9 +232,10 @@ class BleAuthService : LifecycleService() {
             g: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
+            Log.d(TAG, "onCharacteristicChanged (legacy) called for ${characteristic.uuid}")
             if (characteristic.uuid == Constants.CHALLENGE_CHAR_UUID) {
                 val value = characteristic.value ?: return
-                Log.i(TAG, "Challenge received (${value.size} bytes) [legacy]")
+                Log.i(TAG, "Challenge received (${value.size} bytes) via legacy API")
                 handleChallenge(g, value)
             }
         }
@@ -255,6 +257,7 @@ class BleAuthService : LifecycleService() {
      * Receives the 32-byte challenge from Arch and starts the BLE + WS race.
      */
     private fun handleChallenge(g: BluetoothGatt, challenge: ByteArray) {
+        Log.d(TAG, "handleChallenge called with challenge size: ${challenge.size}")
         if (challenge.size != 32) {
             Log.e(TAG, "Invalid challenge length: ${challenge.size}")
             return

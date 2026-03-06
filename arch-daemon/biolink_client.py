@@ -43,7 +43,9 @@ def _notify(message: str):
     """Best-effort desktop notification while running under PAM."""
     import shlex
     uid = os.getuid()
-    wayland_display = os.environ.get("WAYLAND_DISPLAY", "wayland-1")
+    username = os.environ.get("PAM_USER")
+    wayland_display = os.environ.get("WAYLAND_DISPLAY")
+    hyprland_sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")
     dbus_addr = os.environ.get(
         "DBUS_SESSION_BUS_ADDRESS",
@@ -51,14 +53,24 @@ def _notify(message: str):
     )
     safe_msg = shlex.quote(message)
 
+    # If neither Hyprland nor Wayland display is detected, print to stderr and exit.
+    if not (wayland_display or hyprland_sig):
+        print(f"BioLink: {message}", file=sys.stderr)
+        return
+
+    # Determine command prefix for user execution if running as root
+    cmd_prefix = ""
+    if uid == 0 and username:
+        cmd_prefix = f"sudo -u {username} "
+
     # hyprctl notify (Hyprland)
     os.system(
-        f'DISPLAY=:0 WAYLAND_DISPLAY={shlex.quote(wayland_display)} '
+        f'{cmd_prefix}DISPLAY=:0 WAYLAND_DISPLAY={shlex.quote(wayland_display)} '
         f'hyprctl notify -1 4000 "rgb(00aaff)" "BioLink: {message}" 2>/dev/null || true'
     )
     # fallback: dunstify
     os.system(
-        f'DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS={shlex.quote(dbus_addr)} '
+        f'{cmd_prefix}DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS={shlex.quote(dbus_addr)} '
         f'dunstify -t 4000 "BioLink 4FA" {safe_msg} 2>/dev/null || true'
     )
 

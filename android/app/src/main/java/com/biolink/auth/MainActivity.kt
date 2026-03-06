@@ -76,7 +76,13 @@ class MainActivity : AppCompatActivity() {
     private val authReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == BleAuthService.ACTION_AUTH_REQUEST) {
-                val challenge = intent.getByteArrayExtra(BleAuthService.EXTRA_CHALLENGE) ?: return
+                Log.d(TAG, "Auth request broadcast received.")
+                val challenge = intent.getByteArrayExtra(BleAuthService.EXTRA_CHALLENGE)
+                if (challenge == null) {
+                    Log.e(TAG, "Auth request received but no challenge extra found.")
+                    return
+                }
+                Log.d(TAG, "Challenge extracted, size: ${challenge.size}")
                 showBiometricPrompt(challenge)
             }
         }
@@ -184,10 +190,13 @@ class MainActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private fun showBiometricPrompt(challenge: ByteArray) {
+        Log.d(TAG, "showBiometricPrompt called.")
         if (!canUseBiometrics()) {
+            Log.w(TAG, "Biometrics not available or not enrolled.")
             Toast.makeText(this, "Biometrics not available", Toast.LENGTH_SHORT).show()
             return
         }
+        Log.d(TAG, "Biometrics are available.")
 
         val signature: Signature = try {
             KeystoreManager.initSignature()

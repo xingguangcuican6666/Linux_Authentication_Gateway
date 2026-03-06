@@ -43,25 +43,14 @@ import struct
 import sys
 import time
 from pathlib import Path
+import subprocess
 from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Optional imports – daemon degrades gracefully if BLE libraries are absent
 # so unit tests can import the module without a BlueZ stack.
 # ---------------------------------------------------------------------------
-try:
-    from bless import BlessServer, BlessGATTCharacteristic, GATTCharacteristicProperties, GATTAttributePermissions  # type: ignore
-    BLE_AVAILABLE = True
-except ImportError:
-    BLE_AVAILABLE = False
-    logging.warning("bless library not found – BLE peripheral mode disabled")
 
-try:
-    import websockets  # type: ignore
-    WS_AVAILABLE = True
-except ImportError:
-    WS_AVAILABLE = False
-    logging.warning("websockets library not found – WebSocket fallback disabled")
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -73,21 +62,12 @@ except ImportError:
     CRYPTO_AVAILABLE = False
     logging.error("cryptography library not found – cannot verify signatures!")
 
-# ---------------------------------------------------------------------------
-# BLE UUIDs  (must match android/app/src/main/java/com/biolink/auth/Constants.kt)
-# ---------------------------------------------------------------------------
-SERVICE_UUID        = "12345678-1234-5678-1234-56789abcdef0"
-CHALLENGE_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef1"
-SIGNATURE_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef2"
-PUBKEY_CHAR_UUID    = "12345678-1234-5678-1234-56789abcdef3"
 
-# Client Characteristic Configuration Descriptor UUID
-CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
 
 # ---------------------------------------------------------------------------
 # Unix domain socket used to communicate with PAM client (biolink_client.py)
 # ---------------------------------------------------------------------------
-PAM_SOCKET_PATH = "/run/biolink/auth.sock"
+PAM_SOCKET_PATH = "/run/biolink/.android/auth.sock"
 
 # ---------------------------------------------------------------------------
 # Default paths
@@ -105,6 +85,47 @@ logging.basicConfig(
 )
 log = logging.getLogger("biolink.daemon")
 
+ADB_TIMEOUT = 30.0 # Timeout for ADB operations
+ADB_APP_PACKAGE = "com.biolink.adbauth"
+ADB_AUTH_ACTIVITY = f"{ADB_APP_PACKAGE}.AdbAuthActivity"
+ADB_RESULT_FILE = f"/data/data/{ADB_APP_PACKAGE}/cache/adb_auth_result.txt"
+ADB_PUBKEY_FILE = f"/data/data/{ADB_APP_PACKAGE}/cache/adb_pubkey.txt"
+EXTRA_CHALLENGE = "challenge"
+
+async def _run_adb_command(args: list[str], timeout: float = ADB_TIMEOUT) -> str:
+    """Run an ADB command and return its stdout, or raise an exception on error."""
+    cmd = ["adb"] + args
+    log.debug("Running ADB command: %s", " ".join(cmd))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
+        if proc.returncode != 0:
+            error_msg = f"ADB command failed with exit code {proc.returncode}: {stderr.decode().strip()}"
+            log.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        output = stdout.decode().strip()
+        log.debug("ADB command output: %s", output)
+        return output
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        error_msg = f"ADB command timed out after {timeout} seconds: {' '.join(cmd)}"
+        log.error(error_msg)
+        raise RuntimeError(error_msg)
+    except FileNotFoundError:
+        error_msg = "ADB command not found. Is ADB installed and in PATH?"
+        log.error(error_msg)
+        raise RuntimeError(error_msg)
+    except Exception as exc:
+        error_msg = f"Error running ADB command {' '.join(cmd)}: {exc}"
+        log.error(error_msg)
+        raise RuntimeError(error_msg)
 
 # ===========================================================================
 # Public-key management
@@ -169,8 +190,7 @@ def verify_ecdsa_signature(public_key, challenge: bytes, signature_der: bytes) -
 class BioLinkDaemon:
     """Coordinates BLE GATT server + WebSocket server for 4FA authentication."""
 
-    def __init__(self, ws_port: int, pubkey_path: str):
-        self.ws_port = ws_port
+    def __init__(self, pubkey_path: str):
         self.pubkey_path = pubkey_path
 
         # Loaded public key (cryptography library EC public key object)
@@ -181,12 +201,6 @@ class BioLinkDaemon:
         self._auth_event: asyncio.Event = asyncio.Event()
         self._auth_result: bool = False
 
-        # BLE GATT server
-        self._ble_server: Optional[object] = None
-
-        # Connected WebSocket clients
-        self._ws_clients: set = set()
-
         # Unix-socket PAM listener task
         self._pam_queue: asyncio.Queue = asyncio.Queue()
 
@@ -196,10 +210,6 @@ class BioLinkDaemon:
 
     async def run(self):
         tasks = [self._pam_server_loop()]
-        if BLE_AVAILABLE:
-            tasks.append(self._ble_server_loop())
-        if WS_AVAILABLE:
-            tasks.append(self._ws_server_loop())
         await asyncio.gather(*tasks)
 
     # -----------------------------------------------------------------------
@@ -243,8 +253,8 @@ class BioLinkDaemon:
 
     async def _perform_auth(self, timeout: float = 30.0) -> bool:
         """
-        Generate a challenge, broadcast it over BLE + WS, wait for a signed
-        response, verify, and return True on success.
+        Generate a challenge, send it to the Android device via ADB,
+        wait for a signed response, verify, and return True on success.
         """
         challenge = secrets.token_bytes(32)
         self._challenge = challenge
@@ -253,18 +263,66 @@ class BioLinkDaemon:
 
         log.info("Challenge: %s", challenge.hex())
 
-        # Notify over both channels concurrently
-        await asyncio.gather(
-            self._ble_send_challenge(challenge),
-            self._ws_broadcast_challenge(challenge),
-            return_exceptions=True,
-        )
-
-        # Wait for the phone to respond (via either channel)
+        # Send challenge to Android device via ADB
         try:
-            await asyncio.wait_for(self._auth_event.wait(), timeout=timeout)
+            # Clear previous result file
+            await _run_adb_command(["shell", "rm", "-f", ADB_RESULT_FILE])
+
+            # Launch AdbAuthActivity with challenge (Base64 encoded)
+            challenge_b64 = base64.b64encode(challenge).decode('utf-8') # Ensure utf-8 encoding
+            await _run_adb_command([
+                "shell", "am", "start", "-n", ADB_AUTH_ACTIVITY,
+                "-a", f"{ADB_APP_PACKAGE}.ACTION_AUTH",
+                "--es", EXTRA_CHALLENGE, challenge_b64 # Pass as key-value string
+            ], timeout=5.0) # Short timeout for launching activity
+
+            # Wait for the phone to write the result file (and user to authenticate)
+            # We poll for the file existence/content
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                try:
+                    await _run_adb_command(["shell", "test", "-f", ADB_RESULT_FILE])
+                    # If test -f succeeds, file exists, pull it
+                    break
+                except RuntimeError:
+                    # File not yet present, wait and retry
+                    await asyncio.sleep(0.5)
+            else:
+                log.warning("Authentication timed out: result file not created.")
+                return False
+
+            # Pull result file
+            local_result_path = Path("/tmp") / f"adb_auth_result_{os.getpid()}.txt"
+            try:
+                await _run_adb_command(["pull", ADB_RESULT_FILE, str(local_result_path)])
+                result_content = local_result_path.read_text().strip()
+                local_result_path.unlink() # Clean up
+
+                if result_content.startswith("OK"):
+                    # Format: "OK<base64_signature>"
+                    parts = result_content.split("OK", 1)
+                    if len(parts) > 1 and parts[1]:
+                        signature_b64 = parts[1]
+                        signature_der = base64.b64decode(signature_b64)
+                        self._on_signature_received(signature_der)
+                    else:
+                        log.error("ADB result malformed: %s", result_content)
+                        return False
+                else:
+                    log.warning("Authentication failed on device: %s", result_content)
+                    return False
+            except Exception as exc:
+                log.error("Failed to retrieve or parse ADB result: %s", exc)
+                return False
+
+        except RuntimeError as e:
+            log.error("ADB authentication failed: %s", e)
+            return False
         except asyncio.TimeoutError:
-            log.warning("Authentication timed out after %.0fs", timeout)
+            log.warning("ADB operation timed out during authentication.")
+            return False
+        except Exception as e:
+            log.error("Unexpected error during ADB authentication: %s", e)
             return False
 
         return self._auth_result
@@ -283,176 +341,55 @@ class BioLinkDaemon:
         self._auth_result = ok
         self._auth_event.set()
 
-    # -----------------------------------------------------------------------
-    # BLE GATT server (peripheral)
-    # -----------------------------------------------------------------------
-
-    async def _ble_server_loop(self):
-        if not BLE_AVAILABLE:
-            return
+    async def get_public_key_from_device(self) -> bytes:
+        """Retrieve public key from Android device via ADB and return its DER bytes."""
+        log.info("Requesting public key from Android device...")
         try:
-            server = BlessServer(name="BioLink-Arch")
-            server.read_request_func = self._ble_read_handler
-            server.write_request_func = self._ble_write_handler
+            # Clear previous pubkey file
+            await _run_adb_command(["shell", "rm", "-f", ADB_PUBKEY_FILE])
 
-            await server.add_gatt(self._build_gatt_dict())
-            await server.start()
-            self._ble_server = server
-            log.info("BLE GATT server started (UUID: %s)", SERVICE_UUID)
+            # Launch AdbAuthActivity with GET_PUBKEY action
+            await _run_adb_command([
+                "shell", "am", "start", "-n", ADB_AUTH_ACTIVITY,
+                "-a", f"{ADB_APP_PACKAGE}.ACTION_GET_PUBKEY",
+            ], timeout=5.0)
 
-            # Keep alive
-            await asyncio.Event().wait()
-        except Exception as exc:
-            log.error("BLE server error: %s", exc)
-
-    def _build_gatt_dict(self) -> dict:
-        """Build the GATT service definition for bless."""
-        props_indicate = (
-            GATTCharacteristicProperties.indicate
-        )
-        props_write = (
-            GATTCharacteristicProperties.write
-        )
-        props_read_write = (
-            GATTCharacteristicProperties.read |
-            GATTCharacteristicProperties.write
-        )
-        perms_rw = (
-            GATTAttributePermissions.readable |
-            GATTAttributePermissions.writeable
-        )
-        return {
-            SERVICE_UUID: {
-                CHALLENGE_CHAR_UUID: {
-                    "Properties": props_indicate,
-                    "Permissions": GATTAttributePermissions.readable,
-                    "Value": bytearray(32),
-                    "Descriptors": {
-                        CCCD_UUID: {
-                            "Properties": (
-                                GATTCharacteristicProperties.read |
-                                GATTCharacteristicProperties.write
-                            ),
-                            "Permissions": perms_rw,
-                            "Value": bytearray(2),
-                        }
-                    },
-                },
-                SIGNATURE_CHAR_UUID: {
-                    "Properties": props_write,
-                    "Permissions": GATTAttributePermissions.writeable,
-                    "Value": None,
-                },
-                PUBKEY_CHAR_UUID: {
-                    "Properties": props_read_write,
-                    "Permissions": perms_rw,
-                    "Value": bytearray(0),
-                },
-            }
-        }
-
-    def _ble_read_handler(self, characteristic: object, **kwargs) -> bytearray:
-        char_uuid = str(getattr(characteristic, "uuid", "")).lower()
-        if char_uuid == PUBKEY_CHAR_UUID.lower():
-            if self.public_key and CRYPTO_AVAILABLE:
-                der = self.public_key.public_bytes(
-                    serialization.Encoding.DER,
-                    serialization.PublicFormat.SubjectPublicKeyInfo,
-                )
-                return bytearray(der)
-        return bytearray(0)
-
-    def _ble_write_handler(self, characteristic: object, value: bytearray, **kwargs):
-        char_uuid = str(getattr(characteristic, "uuid", "")).lower()
-
-        if char_uuid == SIGNATURE_CHAR_UUID.lower():
-            log.info("BLE: signature received (%d bytes)", len(value))
-            self._on_signature_received(bytes(value))
-
-        elif char_uuid == PUBKEY_CHAR_UUID.lower():
-            log.info("BLE: public key received (%d bytes) – saving for pairing", len(value))
-            if save_public_key(bytes(value), self.pubkey_path):
-                self.public_key = load_public_key(self.pubkey_path)
-
-    async def _ble_send_challenge(self, challenge: bytes):
-        """Update the challenge characteristic value so connected clients get notified."""
-        if not BLE_AVAILABLE or self._ble_server is None:
-            return
-        try:
-            self._ble_server.get_characteristic(CHALLENGE_CHAR_UUID).value = bytearray(challenge)
-            await self._ble_server.update_value(SERVICE_UUID, CHALLENGE_CHAR_UUID)
-            log.debug("BLE challenge updated")
-        except Exception as exc:
-            log.warning("BLE challenge send failed: %s", exc)
-
-    # -----------------------------------------------------------------------
-    # WebSocket server (LAN fallback)
-    # -----------------------------------------------------------------------
-
-    async def _ws_server_loop(self):
-        if not WS_AVAILABLE:
-            return
-        try:
-            async with websockets.serve(  # type: ignore[attr-defined]
-                self._ws_handler, "0.0.0.0", self.ws_port
-            ):
-                log.info("WebSocket server listening on port %d", self.ws_port)
-                await asyncio.Event().wait()
-        except Exception as exc:
-            log.error("WebSocket server error: %s", exc)
-
-    async def _ws_handler(self, websocket):
-        self._ws_clients.add(websocket)
-        log.info("WS client connected: %s", websocket.remote_address)
-        try:
-            async for raw in websocket:
+            # Wait for the phone to write the pubkey file
+            start_time = time.time()
+            timeout = 10.0 # Shorter timeout for pubkey retrieval
+            while time.time() - start_time < timeout:
                 try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
-                    await websocket.send(json.dumps({"error": "invalid JSON"}))
-                    continue
+                    await _run_adb_command(["shell", "test", "-f", ADB_PUBKEY_FILE])
+                    break
+                except RuntimeError:
+                    await asyncio.sleep(0.5)
+            else:
+                raise RuntimeError("Timeout waiting for public key file.")
 
-                msg_type = msg.get("type")
-                if msg_type == "signature":
-                    sig_hex = msg.get("signature", "")
-                    try:
-                        sig_bytes = bytes.fromhex(sig_hex)
-                    except ValueError:
-                        await websocket.send(json.dumps({"error": "invalid hex"}))
-                        continue
-                    log.info("WS: signature received (%d bytes)", len(sig_bytes))
-                    self._on_signature_received(sig_bytes)
-                    await websocket.send(json.dumps({"type": "ack"}))
-
-                elif msg_type == "pubkey":
-                    pubkey_b64 = msg.get("pubkey", "")
-                    try:
-                        der_bytes = base64.b64decode(pubkey_b64)
-                    except Exception:
-                        await websocket.send(json.dumps({"error": "invalid base64"}))
-                        continue
-                    if save_public_key(der_bytes, self.pubkey_path):
-                        self.public_key = load_public_key(self.pubkey_path)
-                        await websocket.send(json.dumps({"type": "paired"}))
-
-        except Exception as exc:
-            log.warning("WS client error: %s", exc)
-        finally:
-            self._ws_clients.discard(websocket)
-            log.info("WS client disconnected")
-
-    async def _ws_broadcast_challenge(self, challenge: bytes):
-        """Send the challenge to all connected WebSocket clients."""
-        if not WS_AVAILABLE or not self._ws_clients:
-            return
-        msg = json.dumps({"type": "challenge", "challenge": challenge.hex()})
-        disconnected = set()
-        for ws in list(self._ws_clients):
+            # Pull pubkey file
+            local_pubkey_path = Path("/tmp") / f"adb_pubkey_{os.getpid()}.txt"
             try:
-                await ws.send(msg)
-            except Exception:
-                disconnected.add(ws)
-        self._ws_clients -= disconnected
+                await _run_adb_command(["pull", ADB_PUBKEY_FILE, str(local_pubkey_path)])
+                result_content = local_pubkey_path.read_text().strip()
+                local_pubkey_path.unlink()
+
+                if result_content.startswith("OK"):
+                    parts = result_content.split("OK", 1)
+                    if len(parts) > 1 and parts[1]:
+                        pubkey_b64 = parts[1]
+                        return base64.b64decode(pubkey_b64)
+                    else:
+                        raise RuntimeError(f"ADB public key result malformed: {result_content}")
+                else:
+                    raise RuntimeError(f"Failed to retrieve public key from device: {result_content}")
+            except Exception as exc:
+                raise RuntimeError(f"Failed to retrieve or parse ADB public key: {exc}")
+
+        except Exception as e:
+            log.error("ADB public key retrieval failed: %s", e)
+            raise
+
+
 
 
 # ===========================================================================
@@ -462,10 +399,6 @@ class BioLinkDaemon:
 def main():
     parser = argparse.ArgumentParser(description="BioLink 4FA Arch Daemon")
     parser.add_argument(
-        "--ws-port", type=int, default=DEFAULT_WS_PORT,
-        help=f"WebSocket server port (default: {DEFAULT_WS_PORT})"
-    )
-    parser.add_argument(
         "--pubkey", default=DEFAULT_PUBKEY_PATH,
         help=f"Path to EC public key PEM file (default: {DEFAULT_PUBKEY_PATH})"
     )
@@ -474,14 +407,33 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity"
     )
+    parser.add_argument(
+        "--pair", action="store_true",
+        help="Retrieve public key from paired Android device via ADB and save it."
+    )
     args = parser.parse_args()
 
     logging.getLogger().setLevel(getattr(logging, args.log_level))
 
-    daemon = BioLinkDaemon(ws_port=args.ws_port, pubkey_path=args.pubkey)
+    daemon = BioLinkDaemon(pubkey_path=args.pubkey)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    # If --pair is set, trigger pairing and exit
+    if args.pair:
+        log.info("Starting ADB pairing process...")
+        try:
+            pub_key_der = loop.run_until_complete(daemon.get_public_key_from_device())
+            if save_public_key(pub_key_der, args.pubkey):
+                log.info("Public key successfully retrieved and saved for pairing.")
+                sys.exit(0)
+            else:
+                log.error("Failed to save public key after retrieval.")
+                sys.exit(1)
+        except Exception as e:
+            log.error("ADB pairing failed: %s", e)
+            sys.exit(1)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, loop.stop)

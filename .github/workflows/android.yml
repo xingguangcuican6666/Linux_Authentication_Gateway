@@ -55,31 +55,31 @@ jobs:
       # 5. Decode release keystore from Secret (Base64-encoded .jks)
       # -----------------------------------------------------------------------
       - name: Decode keystore
-        if: github.event_name != 'pull_request'
+        if: false
         working-directory: android
         env:
           RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
         run: |
-          echo "$RELEASE_KEYSTORE" | base64 --decode > release.jks
+          echo -n "$RELEASE_KEYSTORE" | base64 --decode > app/release.jks
 
       # -----------------------------------------------------------------------
       # 6. Build release APK
       # -----------------------------------------------------------------------
-      - name: Build release APK
+      - name: Build debug AdbAuth APK
         working-directory: android
         env:
-          KEYSTORE_PATH: ${{ github.event_name != 'pull_request' && 'release.jks' || '' }}
+          KEYSTORE_PATH: ${{ github.event_name != 'pull_request' && 'app/release.jks' || '' }}
           KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew :adb_auth:assembleDebug --no-daemon
 
       # -----------------------------------------------------------------------
       # 7. Sign APK with apksigner (V2 + V3 scheme)
       #    r0adkll/sign-android-release handles zipalign + signing in one step.
       # -----------------------------------------------------------------------
       - name: Sign APK
-        if: github.event_name != 'pull_request'
+        if: false
         id: sign_apk
         uses: r0adkll/sign-android-release@v1
         with:
@@ -99,20 +99,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: biolink-debug-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: android/adb_auth/build/outputs/apk/debug/*.apk
 
-      - name: Upload signed APK artifact
+      - name: Upload debug APK artifact (Push)
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: biolink-signed-apk
-          path: ${{ steps.sign_apk.outputs.signedReleaseFile }}
+          path: android/adb_auth/build/outputs/apk/debug/*.apk
 
       # -----------------------------------------------------------------------
       # 9. Create GitHub Release (only on tag push)
       # -----------------------------------------------------------------------
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: false
         uses: softprops/action-gh-release@v2
         with:
           name: BioLink ${{ github.ref_name }}
@@ -137,6 +137,6 @@ jobs:
       # 10. Clean up keystore file (security hygiene)
       # -----------------------------------------------------------------------
       - name: Remove keystore
-        if: always() && github.event_name != 'pull_request'
+        if: false
         working-directory: android
         run: rm -f release.jks

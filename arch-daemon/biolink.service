@@ -1,33 +1,43 @@
 [Unit]
 Description=BioLink 4FA Authentication Daemon
-Documentation=https://github.com/xingguangcuican6666/Linux_Authentication_Gateway
-After=network.target bluetooth.target
-Requires=bluetooth.target
+After=network.target
 
 [Service]
-Type=simple
-User=biolink
-Group=biolink
-# RuntimeDirectory creates /run/biolink with correct ownership
-RuntimeDirectory=biolink
-RuntimeDirectoryMode=0750
+# 直接用 root 运行，解决所有 USB 权限问题
+User=root
+Group=root
 
+RuntimeDirectory=biolink
+# 强制指定 HOME 到 /run/biolink，防止写到 /root/.android
+Environment=HOME=/run/biolink
+Environment=ADB_HOME=/run/biolink/.android
+Environment=PYTHONUNBUFFERED=1
+
+# 启动前彻底清理旧的 adb 遗留（核心：杀掉可能残存的 adb server）
+ExecStartPre=-/usr/bin/adb kill-server
+ExecStartPre=/usr/bin/rm -f /run/biolink/auth.sock
+
+# 脚本运行
 ExecStart=/usr/bin/python3 /usr/lib/biolink/biolink_daemon.py \
     --pubkey /etc/biolink/pubkey.pem \
-    --ws-port 7777 \
     --log-level INFO
 
-# Security hardening
-PrivateTmp=true
+# 软链接依然保留，兼容你的 client 路径
+ExecStartPost=/usr/bin/bash -c 'sleep 1; \
+    ln -sf /run/biolink/.android/auth.sock /run/biolink/auth.sock; \
+    chmod 666 /run/biolink/auth.sock'
+
+# --- 真正的稳：利用 Systemd 隔离 root ---
+# 虽然是 root 运行，但我们限制它只能看这几个目录
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/biolink /run/biolink
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+# 允许读写关键路径
+ReadWritePaths=/etc/biolink /run/biolink /tmp
+# 允许访问 USB 设备（root 运行下这行其实就不怕权限拒绝了）
+PrivateDevices=false
 
 Restart=on-failure
-RestartSec=5s
+RestartSec=3s
 
 [Install]
 WantedBy=multi-user.target

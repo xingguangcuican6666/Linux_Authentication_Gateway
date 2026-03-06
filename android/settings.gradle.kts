@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "BioLink"
 include(":app")
+include(":adb_auth")
