@@ -12,6 +12,8 @@ jobs:
   build:
     name: Build & Sign APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create GitHub Releases and upload assets
 
     steps:
       # -----------------------------------------------------------------------
