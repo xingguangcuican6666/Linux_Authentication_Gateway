@@ -1,0 +1,18 @@
+# BioLink Arch daemon Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# For Arch Linux (recommended): use pacman / AUR where possible
+#   pacman -S python-cryptography python-websockets
+#   yay -S python-bless  # or: pip install bless
+
+# ECDSA signature verification (P-256 / SHA-256)
+cryptography>=42.0.0
+
+# BLE GATT peripheral server (uses BlueZ on Linux)
+bless>=0.2.2
+
+# BLE Central scanning (used by the daemon to detect nearby devices)
+bleak>=0.21.1
+
+# WebSocket server for LAN fallback channel
+websockets>=12.0

@@ -1,0 +1,47 @@
+# PAM configuration examples for BioLink 4FA
+#
+# Place the relevant snippet in the appropriate /etc/pam.d/ file.
+# The exact file depends on your display manager and login method:
+#
+#   Hyprland / swaylock / hyprlock  →  /etc/pam.d/hyprlock  (or swaylock)
+#   System-wide login               →  /etc/pam.d/system-auth
+#   sudo                            →  /etc/pam.d/sudo
+#
+# WARNING: Test in a separate terminal session BEFORE closing your current
+#          one to avoid being locked out.
+#
+# ============================================================
+# Minimal 4FA stack (all four factors REQUIRED):
+#
+#   Factor 1: UNIX password
+#   Factor 2: Face recognition (Howdy)
+#   Factor 3: Phone presence + fingerprint (BioLink)
+#
+# NOTE: Howdy's pam_howdy.so typically replaces password (sufficient).
+#       Adjust the control flags to suit your threat model.
+# ============================================================
+
+# --- /etc/pam.d/hyprlock ---
+#
+# Factor 1: Password (required – must succeed)
+auth      required   pam_unix.so
+#
+# Factor 2: Face (Howdy) – if Howdy succeeds, password is still required above
+auth      required   pam_howdy.so
+#
+# Factor 3 + 4: Phone presence (BLE proximity) + hardware fingerprint (TEE ECDSA)
+auth      required   pam_exec.so expose_authtok /usr/bin/biolink-client
+
+# session / account / password lines stay as your distro defaults
+@include common-account
+@include common-session
+@include common-password
+
+
+# ============================================================
+# Relaxed stack – Howdy OR (BioLink + password) are both acceptable:
+# ============================================================
+#
+# auth  sufficient  pam_howdy.so
+# auth  required    pam_unix.so
+# auth  required    pam_exec.so expose_authtok /usr/bin/biolink-client

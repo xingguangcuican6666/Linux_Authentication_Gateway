@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BioLink 4FA</string>
+
+    <!-- Status strings -->
+    <string name="status_idle">Idle – service not started</string>
+    <string name="status_scanning">Scanning for Arch device…</string>
+    <string name="status_stopped">Service stopped</string>
+    <string name="status_auth_success">✓ Authentication successful</string>
+    <string name="status_auth_failed">✗ Biometric not recognised</string>
+    <string name="status_auth_error">Auth error: %1$s</string>
+
+    <!-- Labels / hints -->
+    <string name="label_qr_hint">Scan with Arch daemon to pair (one-time)</string>
+    <string name="label_ws_url">WebSocket fallback URL (optional)</string>
+    <string name="hint_public_key">Public key (Base64)</string>
+    <string name="hint_ws_url">ws://192.168.1.x:7777/auth</string>
+    <string name="cd_qr_code">Public key QR code for pairing</string>
+
+    <!-- Buttons -->
+    <string name="btn_start">Start Service</string>
+    <string name="btn_stop">Stop Service</string>
+    <string name="btn_regenerate_key">Re-generate Key Pair</string>
+    <string name="btn_save">Save</string>
+
+    <!-- Biometric prompt -->
+    <string name="biometric_title">BioLink Authentication</string>
+    <string name="biometric_subtitle">Verify your fingerprint to sign the challenge</string>
+    <string name="biometric_description">Your fingerprint is used to unlock the hardware-secured signing key.</string>
+    <string name="biometric_cancel">Cancel</string>
+</resources>

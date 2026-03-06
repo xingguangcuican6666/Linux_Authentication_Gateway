@@ -1,0 +1,33 @@
+[Unit]
+Description=BioLink 4FA Authentication Daemon
+Documentation=https://github.com/xingguangcuican6666/Linux_Authentication_Gateway
+After=network.target bluetooth.target
+Requires=bluetooth.target
+
+[Service]
+Type=simple
+User=biolink
+Group=biolink
+# RuntimeDirectory creates /run/biolink with correct ownership
+RuntimeDirectory=biolink
+RuntimeDirectoryMode=0750
+
+ExecStart=/usr/bin/python3 /usr/lib/biolink/biolink_daemon.py \
+    --pubkey /etc/biolink/pubkey.pem \
+    --ws-port 7777 \
+    --log-level INFO
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/biolink /run/biolink
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

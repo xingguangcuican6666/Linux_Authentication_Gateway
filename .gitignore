@@ -20,3 +20,34 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+### Android ###
+# Gradle build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/release.jks
+# Android Studio
+android/.idea/
+android/**/*.iml
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/
+# Keystore files (never commit keystores)
+*.jks
+*.keystore
+
+### Python ###
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
