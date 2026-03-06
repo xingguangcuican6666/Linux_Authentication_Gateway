@@ -1,0 +1,140 @@
+name: Android CI – Build, Sign & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build & Sign APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Java 17 (required by AGP 8.x)
+      # -----------------------------------------------------------------------
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      # -----------------------------------------------------------------------
+      # 3. Gradle cache
+      # -----------------------------------------------------------------------
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/libs.versions.toml') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # -----------------------------------------------------------------------
+      # 4. Grant execute permission for Gradle wrapper
+      # -----------------------------------------------------------------------
+      - name: Make gradlew executable
+        working-directory: android
+        run: chmod +x gradlew
+
+      # -----------------------------------------------------------------------
+      # 5. Decode release keystore from Secret (Base64-encoded .jks)
+      # -----------------------------------------------------------------------
+      - name: Decode keystore
+        if: github.event_name != 'pull_request'
+        working-directory: android
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+        run: |
+          echo "$RELEASE_KEYSTORE" | base64 --decode > release.jks
+
+      # -----------------------------------------------------------------------
+      # 6. Build release APK
+      # -----------------------------------------------------------------------
+      - name: Build release APK
+        working-directory: android
+        env:
+          KEYSTORE_PATH: ${{ github.event_name != 'pull_request' && 'release.jks' || '' }}
+          KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      # -----------------------------------------------------------------------
+      # 7. Sign APK with apksigner (V2 + V3 scheme)
+      #    r0adkll/sign-android-release handles zipalign + signing in one step.
+      # -----------------------------------------------------------------------
+      - name: Sign APK
+        if: github.event_name != 'pull_request'
+        id: sign_apk
+        uses: r0adkll/sign-android-release@v1
+        with:
+          releaseDirectory: android/app/build/outputs/apk/release
+          signingKeyBase64: ${{ secrets.RELEASE_KEYSTORE }}
+          alias: ${{ secrets.RELEASE_KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        env:
+          BUILD_TOOLS_VERSION: "34.0.0"
+
+      # -----------------------------------------------------------------------
+      # 8. Upload APK artifact (for every push, including PRs)
+      # -----------------------------------------------------------------------
+      - name: Upload unsigned APK artifact (PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: biolink-debug-apk
+          path: android/app/build/outputs/apk/release/*.apk
+
+      - name: Upload signed APK artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: biolink-signed-apk
+          path: ${{ steps.sign_apk.outputs.signedReleaseFile }}
+
+      # -----------------------------------------------------------------------
+      # 9. Create GitHub Release (only on tag push)
+      # -----------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: BioLink ${{ github.ref_name }}
+          body: |
+            ## BioLink 4FA – ${{ github.ref_name }}
+
+            ### Installation
+            1. Download `biolink-${{ github.ref_name }}-signed.apk` below.
+            2. Enable "Install from unknown sources" in Android settings.
+            3. Install the APK and grant all requested permissions.
+            4. Open the app and scan the QR code with the Arch daemon to pair.
+
+            ### Verification
+            The APK is signed with the project release key (V2/V3 scheme).
+            SHA-256 of the signing certificate is published in `SECURITY.md`.
+          files: ${{ steps.sign_apk.outputs.signedReleaseFile }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 10. Clean up keystore file (security hygiene)
+      # -----------------------------------------------------------------------
+      - name: Remove keystore
+        if: always() && github.event_name != 'pull_request'
+        working-directory: android
+        run: rm -f release.jks
