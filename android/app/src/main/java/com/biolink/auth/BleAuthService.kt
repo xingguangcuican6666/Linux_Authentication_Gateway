@@ -59,6 +59,10 @@ class BleAuthService : LifecycleService() {
     companion object {
         private const val TAG = "BleAuthService"
 
+        const val ACTION_AUTH_REQUEST = "com.biolink.auth.ACTION_AUTH_REQUEST"
+        const val EXTRA_CHALLENGE = "challenge"
+        const val EXTRA_USE_BLE = "use_ble"
+
         fun start(context: Context) {
             val intent = Intent(context, BleAuthService::class.java)
             ContextCompat.startForegroundService(context, intent)
@@ -409,9 +413,4 @@ class BleAuthService : LifecycleService() {
         }
     }
 
-    companion object ActionNames {
-        const val ACTION_AUTH_REQUEST = "com.biolink.auth.ACTION_AUTH_REQUEST"
-        const val EXTRA_CHALLENGE = "challenge"
-        const val EXTRA_USE_BLE = "use_ble"
-    }
 }
